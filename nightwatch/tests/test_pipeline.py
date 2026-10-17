@@ -91,3 +91,26 @@ def test_ocr_missing_is_explicit(monkeypatch):
     monkeypatch.setattr(ocr.shutil,'which',lambda _:None)
     result=ocr.read_plate(np.zeros((40,120),np.uint8))
     assert result['text']=='' and 'not installed' in result['status']
+
+
+def _plate_scene(fill, text):
+    scene = np.full((480, 800, 3), 40, np.uint8)
+    cv2.rectangle(scene, (100, 100), (700, 380), (60, 55, 50), -1)
+    cv2.rectangle(scene, (300, 300), (480, 350), fill, -1)
+    cv2.putText(scene, 'WP CAB 4521', (306, 338), cv2.FONT_HERSHEY_SIMPLEX, .9, text, 3, cv2.LINE_AA)
+    return scene
+
+
+@pytest.mark.parametrize('name,fill,text', [('yellow', (0, 200, 255), (10, 10, 10)),
+                                            ('green', (60, 160, 40), (255, 255, 255)),
+                                            ('red', (30, 30, 200), (255, 255, 255))])
+def test_coloured_plates_are_found(name, fill, text):
+    result = process(_plate_scene(fill, text), Settings(humans=False))
+    assert any(p['colour'] == name and iou(p['box'], [300, 300, 180, 50]) > .6 for p in result['plates'])
+
+
+def test_blue_sign_with_white_text_is_not_a_plate():
+    scene = np.full((480, 800, 3), 40, np.uint8)
+    cv2.rectangle(scene, (520, 120), (760, 190), (200, 80, 20), -1)
+    cv2.putText(scene, 'HOTEL ROOMS', (530, 170), cv2.FONT_HERSHEY_SIMPLEX, .9, (255, 255, 255), 2, cv2.LINE_AA)
+    assert not process(scene, Settings(humans=False))['plates']

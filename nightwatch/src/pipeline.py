@@ -20,9 +20,10 @@ class Settings:
     high: int = 130
     edge_threshold: int = 35
     humans: bool = True
-    hog_threshold: float = 0.4
+    hog_threshold: float = 0.5
+    person_min_height: float = 0.07  # fraction of analysis height
     plates: bool = True
-    plate_min_score: float = 0.42
+    plate_min_score: float = 0.55
     motion_threshold: int = 25
     motion_min_area: int = 150
 
@@ -135,7 +136,25 @@ def nms(items, threshold=0.35):
     return kept
 
 
-def detect_people(gray, threshold):
+def contained(inner, outer, fraction=0.85):
+    ix = max(0, min(inner[0]+inner[2], outer[0]+outer[2]) - max(inner[0], outer[0]))
+    iy = max(0, min(inner[1]+inner[3], outer[1]+outer[3]) - max(inner[1], outer[1]))
+    return ix*iy >= fraction*max(1, inner[2]*inner[3])
+
+
+def drop_nested_people(items):
+    """Remove a smaller box lying inside a larger one unless it is clearly the stronger detection."""
+    kept = []
+    for a in items:
+        nested = any(b is not a and b['box'][2]*b['box'][3] > 1.4*a['box'][2]*a['box'][3]
+                     and contained(a['box'], b['box']) and b['score'] >= .5*a['score']
+                     for b in items)
+        if not nested:
+            kept.append(a)
+    return kept
+
+
+def detect_people(gray, threshold, min_height=0.07):
     """Classical gradient descriptors + bundled linear SVM; no neural model."""
     h, w = gray.shape
     if w < 64 or h < 128:
@@ -152,7 +171,11 @@ def detect_people(gray, threshold):
     for box, score in zip(boxes, np.asarray(weights).reshape(-1)):
         x, y, bw, bh = [int(round(v/scale)) for v in box]
         x, y = max(0, x), max(0, y)
-        out.append(dict(box=[x, y, min(bw, w-x), min(bh, h-y)],
+        bw, bh = min(bw, w-x), min(bh, h-y)
+        # Upright pedestrians are roughly 1:2; reject flat or very tall regions and tiny boxes.
+        if bw < 1 or bh < min_height*h or not 1.3 <= bh/bw <= 3.6:
+            continue
+        out.append(dict(box=[x, y, bw, bh],
                         score=float(score), label='person', method='HOG + linear SVM'))
     return nms(out)
 
@@ -181,8 +204,28 @@ def character_count(binary):
                and area > .001*h*w and bh/max(1,bw) > 1.05)
 
 
-def detect_plates(gray, edge_binary, cfg, detail_gray=None):
-    """Propose regions using edge grouping + bright-plate segmentation.
+def plate_colour_masks(bgr):
+    """Masks for the plate backgrounds in use: yellow, white, green and red."""
+    hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
+    h, sat, val = [c.astype(np.int16) for c in cv2.split(hsv)]
+    masks = {
+        'yellow': (h >= 15) & (h <= 35) & (sat >= 80) & (val >= 90),
+        'white': (sat <= 45) & (val >= 150),
+        'green': (h >= 38) & (h <= 90) & (sat >= 60) & (val >= 50),
+        'red': ((h <= 8) | (h >= 172)) & (sat >= 110) & (val >= 70),
+    }
+    return {k: np.uint8(v)*255 for k, v in masks.items()}
+
+
+def drop_containers(items):
+    """A box enclosing another candidate is usually bumper/body, keep the tight plate."""
+    return [a for a in items
+            if not any(b is not a and a['box'][2]*a['box'][3] > 1.6*b['box'][2]*b['box'][3]
+                       and contained(b['box'], a['box']) for b in items)]
+
+
+def detect_plates(gray, edge_binary, cfg, detail_gray=None, color=None):
+    """Propose regions from edge grouping, bright regions and plate-coloured regions.
 
     Candidate score is a heuristic, never a probability or OCR confidence.
     """
@@ -195,20 +238,40 @@ def detect_plates(gray, edge_binary, cfg, detail_gray=None):
     group = cv2.morphologyEx(group, cv2.MORPH_OPEN, np.ones((3,3), np.uint8))
     _, bright = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
     bright = cv2.morphologyEx(bright, cv2.MORPH_CLOSE, np.ones((3,7), np.uint8))
+    colour_masks = plate_colour_masks(color) if color is not None else {}
+    saturated = (cv2.cvtColor(color, cv2.COLOR_BGR2HSV)[:, :, 1] >= 110) if color is not None else None
+    sources = [group, bright]
+    # Close the dark characters inside each coloured plate so the plate becomes one region.
+    close_k = cv2.getStructuringElement(cv2.MORPH_RECT, (15, 7))
+    for mask in colour_masks.values():
+        sources.append(cv2.morphologyEx(mask, cv2.MORPH_CLOSE, close_k))
     contours = []
-    for mask in (group, bright):
+    for mask in sources:
         cs, _ = cv2.findContours(mask, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
         contours.extend(cs)
     candidates = []
-    for contour in sorted(contours, key=cv2.contourArea, reverse=True)[:350]:
+    for contour in sorted(contours, key=cv2.contourArea, reverse=True)[:500]:
         x, y, bw, bh = cv2.boundingRect(contour)
         ratio, area = bw/max(1,bh), bw*bh
-        if not (1.8 < ratio < 6.8 and bw >= 45 and bh >= 12
-                and .0008*w*h < area < .25*w*h):
+        if not (1.3 < ratio < 6.8 and bw >= 40 and bh >= 12
+                and bw <= .30*w and .0005*w*h < area < .10*w*h):
             continue
         rectangularity = cv2.contourArea(contour)/area
         if rectangularity < .35:
             continue
+        colour_name, fill = 'unknown', 0.
+        if colour_masks:
+            fills = {k: np.count_nonzero(m[y:y+bh, x:x+bw])/area for k, m in colour_masks.items()}
+            colour_name, fill = max(fills.items(), key=lambda kv: kv[1])
+            # Plate background must dominate the box (dark characters take the remainder).
+            if fill < (.30 if colour_name == 'white' else .25):
+                continue
+            # Squarer two-line plates (motorcycles, three-wheelers) need a stronger colour match.
+            if ratio < 1.8 and fill < .45:
+                continue
+            # White plates have dark characters on a colourless field; coloured signs fail this.
+            if colour_name == 'white' and np.count_nonzero(saturated[y:y+bh, x:x+bw])/area > .15:
+                continue
         crop = rectified_crop(detail_gray if detail_gray is not None else gray, contour)
         if min(crop.shape) < 8:
             continue
@@ -222,17 +285,24 @@ def detect_plates(gray, edge_binary, cfg, detail_gray=None):
         plausible = [(mask,count) for mask,count in variants if 3 <= count <= 14]
         binary, chars = max(plausible or variants, key=lambda pair: pair[1])
         density = np.count_nonzero(edge_binary[y:y+bh,x:x+bw])/area
-        # At least three plausible glyph components: avoids calling every rectangle a plate.
-        if chars < 3 or not .025 < density < .75:
+        min_chars = 4 if colour_name == 'white' else 3
+        if chars < min_chars or not .025 < density < .75:
             continue
-        score = (.30*min(1, rectangularity) + .35*min(1,chars/7)
-                 + .20*max(0,1-abs(ratio-3.8)/3.8) + .15*min(1,density/.16))
+        colour_score = min(1., fill/.6) * (.85 if colour_name == 'white' else 1.)
+        if colour_masks:
+            score = (.22*min(1, rectangularity) + .28*min(1,chars/7)
+                     + .15*max(0,1-abs(ratio-3.8)/3.8) + .10*min(1,density/.16)
+                     + .25*colour_score)
+        else:
+            score = (.30*min(1, rectangularity) + .35*min(1,chars/7)
+                     + .20*max(0,1-abs(ratio-3.8)/3.8) + .15*min(1,density/.16))
         if score >= cfg.plate_min_score:
-            candidates.append(dict(box=[x,y,bw,bh], score=float(score), label='plate candidate',
+            candidates.append(dict(box=[x,y,bw,bh], score=float(score), label='plate-'+colour_name,
+                colour=colour_name, colour_fill=float(fill),
                 characters=int(chars), crop=crop, binary=binary,
                 perimeter=float(cv2.arcLength(contour,True)), area=int(area),
                 rectangularity=float(rectangularity), aspect_ratio=float(ratio)))
-    return nms(candidates)[:12], group
+    return drop_containers(nms(candidates))[:12], group
 
 
 def compute_motion(gray, ref, cfg):
@@ -270,9 +340,9 @@ def process(image, cfg=Settings(), reference=None):
     else:
         _, edge_binary = cv2.threshold(active,cfg.edge_threshold,255,cv2.THRESH_BINARY)
     # Compare original and enhanced paths: aggressive night processing can weaken HOG gradients.
-    people = nms(detect_people(original_gray,cfg.hog_threshold) +
-                 detect_people(selected,cfg.hog_threshold)) if cfg.humans else []
-    plates, group = detect_plates(selected,edge_binary,cfg,gray) if cfg.plates else ([],np.zeros_like(selected))
+    people = drop_nested_people(nms(detect_people(original_gray,cfg.hog_threshold,cfg.person_min_height) +
+                 detect_people(selected,cfg.hog_threshold,cfg.person_min_height))) if cfg.humans else []
+    plates, group = detect_plates(selected,edge_binary,cfg,gray,color) if cfg.plates else ([],np.zeros_like(selected))
     person_mask = np.zeros_like(selected)
     plate_mask = np.zeros_like(selected)
     for collection, mask in ((people,person_mask),(plates,plate_mask)):
