@@ -254,7 +254,7 @@ def detect_plates(gray, edge_binary, cfg, detail_gray=None, color=None):
         x, y, bw, bh = cv2.boundingRect(contour)
         ratio, area = bw/max(1,bh), bw*bh
         if not (1.3 < ratio < 6.8 and bw >= 40 and bh >= 12
-                and bw <= .30*w and .0005*w*h < area < .10*w*h):
+                and bw <= .45*w and .0005*w*h < area < .10*w*h):
             continue
         rectangularity = cv2.contourArea(contour)/area
         if rectangularity < .35:
