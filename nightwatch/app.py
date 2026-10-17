@@ -17,6 +17,16 @@ st.markdown('''<style>
 h1 {letter-spacing:-1.8px} [data-testid="stMetric"] {background:#141f2f;border:1px solid #27364a;padding:16px;border-radius:12px}
 [data-testid="stSidebar"] {background:#101a28} .eyebrow {color:#60d8c4;letter-spacing:3px;font-size:12px;font-weight:700}
 .hero-note {color:#a3b3c8;max-width:850px;font-size:17px} .stTabs [data-baseweb="tab-list"] {gap:22px}
+/* Readable text on the dark background, whatever theme the browser or Streamlit default selects. */
+[data-testid="stHeader"] {background:#0b111b}
+[data-testid="stHeader"] * {color:#e6edf6}
+h1,h2,h3,h4,[data-testid="stWidgetLabel"] p,[data-testid="stWidgetLabel"] label,[data-testid="stMarkdownContainer"] p,
+[data-testid="stCheckbox"] label p,[data-testid="stExpander"] summary p,[data-testid="stSidebar"] label p {color:#e6edf6 !important}
+[data-testid="stMetricLabel"] p,[data-testid="stMetricLabel"] {color:#a3b3c8 !important}
+[data-testid="stMetricValue"],[data-testid="stMetricValue"] div {color:#ffffff !important}
+[data-testid="stCaptionContainer"],[data-testid="stCaptionContainer"] p {color:#a3b3c8 !important}
+.stTabs [data-baseweb="tab"] p {color:#a3b3c8} .stTabs [aria-selected="true"] p {color:#ff6b6b}
+[data-testid="stFileUploaderDropzone"] *,[data-testid="stFileUploaderDropzone"] small {color:#e6edf6}
 </style>''',unsafe_allow_html=True)
 st.title('NightWatch')
 
